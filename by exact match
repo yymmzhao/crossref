@@ -1,0 +1,195 @@
+from docx import Document
+from habanero import Crossref
+import pandas as pd
+import time
+
+print("\n" + "="*80)
+print("步骤 1: 从 Word 文档提取完整 References")
+print("="*80)
+
+# 加载文档
+doc = Document('Projected Demand for Dementia Diagnostic Services and Geographic Variation in Clinical Neuropsychologist Workforce Capacity in the United States.docx')
+
+references = []
+in_references = False
+
+for para in doc.paragraphs:
+    if para.text.strip() == "References":
+        in_references = True
+        continue
+    if in_references and para.text.strip():
+        references.append(para.text.strip())
+
+print(f"✓ 找到 {len(references)} 个 references\n")
+
+print("="*80)
+print("步骤 2: 用完整 Reference 文本搜索 Crossref")
+print("="*80)
+
+cr = Crossref()
+verification_results = []
+
+print(f"\n开始搜索 {len(references)} 个 references...")
+print("(这可能需要 2-3 分钟)\n")
+
+for i, ref_text in enumerate(references):
+    if (i + 1) % 10 == 0:
+        print(f"进度: {i+1}/{len(references)}")
+    
+    result = {
+        'ref_number': i + 1,
+        'manuscript_text': ref_text,
+        'status': 'Not Found',
+        'search_method': '',
+        'crossref_title': None,
+        'crossref_authors': None,
+        'crossref_year': None,
+        'crossref_doi': None,
+        'match_quality': 'Not Found',
+        'similarity_score': 0
+    }
+    
+    try:
+        # 用完整的 reference 文本搜索
+        search_results = cr.works(query=ref_text, limit=3)
+        
+        if search_results['message']['items']:
+            # 检查每个结果的相似度
+            best_match = None
+            best_score = 0
+            
+            for item in search_results['message']['items']:
+                # 简单的相似度评分：基于标题和年份的匹配
+                item_title = item.get('title', [''])[0] if item.get('title') else ''
+                item_year = item.get('published-print', {}).get('date-parts', [[None]])[0][0] \
+                           if item.get('published-print') else None
+                
+                # 计算标题相似度（有多少单词在两个字符串中都出现）
+                ref_words = set(ref_text.lower().split())
+                item_words = set(item_title.lower().split())
+                common_words = len(ref_words & item_words)
+                similarity = common_words / max(len(ref_words), len(item_words)) if max(len(ref_words), len(item_words)) > 0 else 0
+                
+                if similarity > best_score:
+                    best_score = similarity
+                    best_match = item
+            
+            if best_match and best_score > 0.3:  # 相似度阈值设为 30%
+                result['status'] = 'Found'
+                result['similarity_score'] = round(best_score, 2)
+                result['search_method'] = f'Full Text (相似度: {round(best_score*100, 1)}%)'
+                result['crossref_title'] = best_match.get('title', [''])[0] if best_match.get('title') else None
+                result['crossref_year'] = best_match.get('published-print', {}).get('date-parts', [[None]])[0][0] \
+                                         if best_match.get('published-print') else None
+                result['crossref_doi'] = best_match.get('DOI', None)
+                
+                # 提取作者
+                authors = best_match.get('author', [])
+                if authors:
+                    author_names = [f"{a.get('family', '')}, {a.get('given', '')}" for a in authors]
+                    result['crossref_authors'] = ' | '.join(author_names[:3])
+                
+                # 判断匹配质量
+                if best_score > 0.7:
+                    result['match_quality'] = 'Exact Match ✓✓'
+                elif best_score > 0.5:
+                    result['match_quality'] = 'Strong Match ✓'
+                else:
+                    result['match_quality'] = 'Weak Match ?'
+            else:
+                result['status'] = 'Low Confidence'
+                result['match_quality'] = 'No Match (相似度太低)'
+    
+    except Exception as e:
+        result['status'] = 'Error'
+        result['match_quality'] = str(e)[:50]
+    
+    verification_results.append(result)
+    time.sleep(0.3)
+
+print(f"\n✓ 验证完成！")
+
+print("\n" + "="*80)
+print("步骤 3: 生成结果摘要")
+print("="*80)
+
+df_results = pd.DataFrame(verification_results)
+
+exact_match = len(df_results[df_results['match_quality'] == 'Exact Match ✓✓'])
+strong_match = len(df_results[df_results['match_quality'] == 'Strong Match ✓'])
+weak_match = len(df_results[df_results['match_quality'] == 'Weak Match ?'])
+not_found = len(df_results[df_results['match_quality'] == 'No Match (相似度太低)'])
+
+print(f"\n总 References: {len(df_results)}")
+print(f"✓✓ 精确匹配: {exact_match}")
+print(f"✓ 强匹配 (相似度 50-70%): {strong_match}")
+print(f"? 弱匹配 (相似度 30-50%): {weak_match}")
+print(f"✗ 未找到/不匹配: {not_found}")
+
+print("\n" + "="*80)
+print("需要检查的 References (非精确匹配)")
+print("="*80)
+
+not_exact = df_results[df_results['match_quality'] != 'Exact Match ✓✓']
+
+if len(not_exact) > 0:
+    print(f"\n找到 {len(not_exact)} 个需要检查的 reference:\n")
+    for idx, row in not_exact.head(20).iterrows():
+        print(f"【{row['ref_number']}】 {row['match_quality']}")
+        print(f"  原文: {row['manuscript_text'][:90]}...")
+        if row['crossref_title']:
+            print(f"  找到: {row['crossref_title'][:90]}...")
+        print(f"  相似度: {row['similarity_score']}")
+        print()
+else:
+    print("\n✓ 所有 References 都精确匹配！")
+
+print("\n" + "="*80)
+print("步骤 4: 保存到 Excel")
+print("="*80)
+
+output_file = 'reference_verification_strict.xlsx'
+
+with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+    df_results.to_excel(writer, sheet_name='All Results', index=False)
+    
+    exact = df_results[df_results['match_quality'] == 'Exact Match ✓✓']
+    exact.to_excel(writer, sheet_name='Exact Match', index=False)
+    
+    strong = df_results[df_results['match_quality'] == 'Strong Match ✓']
+    strong.to_excel(writer, sheet_name='Strong Match', index=False)
+    
+    not_exact.to_excel(writer, sheet_name='Needs Review', index=False)
+    
+    summary_data = {
+        'Verification Result': [
+            'Total References',
+            '---',
+            'Exact Match (70%+)',
+            'Strong Match (50-70%)',
+            'Weak Match (30-50%)',
+            'Not Found/Low Similarity',
+            '---',
+            'Need to Review'
+        ],
+        'Count': [
+            len(df_results),
+            '',
+            exact_match,
+            strong_match,
+            weak_match,
+            not_found,
+            '',
+            len(not_exact)
+        ]
+    }
+    df_summary = pd.DataFrame(summary_data)
+    df_summary.to_excel(writer, sheet_name='Summary', index=False)
+
+print(f"\n✓ 严格验证报告已保存: {output_file}")
+print("\nExcel 包含以下 Sheets:")
+print("  1. All Results - 所有验证结果")
+print("  2. Exact Match - 精确匹配 (70%+)")
+print("  3. Strong Match - 强匹配 (50-70%)")
+print("  4. Needs Review - 需要人工检查的")
+print("  5. Summary - 统计摘要")
